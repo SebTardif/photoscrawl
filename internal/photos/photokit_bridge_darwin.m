@@ -463,7 +463,14 @@ char *photoscrawl_photokit_snapshot(const char *libraryPath, char **errorOut) {
   }
 }
 
-int photoscrawl_export_original_resource(const char *localIdentifier, const char *destinationPath, int allowNetwork, char **errorOut) {
+static dispatch_time_t pcBoundedWaitDeadline(long long timeoutNanoseconds) {
+  if (timeoutNanoseconds <= 0) {
+    return DISPATCH_TIME_NOW;
+  }
+  return dispatch_time(DISPATCH_TIME_NOW, timeoutNanoseconds);
+}
+
+int photoscrawl_export_original_resource(const char *localIdentifier, const char *destinationPath, int allowNetwork, long long timeoutNanoseconds, char **errorOut) {
   @autoreleasepool {
     if (errorOut != NULL) {
       *errorOut = NULL;
@@ -515,7 +522,12 @@ int photoscrawl_export_original_resource(const char *localIdentifier, const char
       }
       dispatch_semaphore_signal(semaphore);
     }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    if (dispatch_semaphore_wait(semaphore, pcBoundedWaitDeadline(timeoutNanoseconds)) != 0) {
+      timedOut = YES;
+      [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+      pcSetError(errorOut, @"export original resource timed out");
+      return 0;
+    }
 
     if (writeErrorDescription != nil) {
       pcSetError(errorOut, [NSString stringWithFormat:@"export original resource: %@", writeErrorDescription]);
