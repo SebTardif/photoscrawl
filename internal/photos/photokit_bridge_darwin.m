@@ -533,7 +533,9 @@ int photoscrawl_export_original_resource(const char *localIdentifier, const char
       dispatch_semaphore_signal(semaphore);
     }];
     if (dispatch_semaphore_wait(semaphore, pcBoundedWaitDeadline(timeoutNanoseconds)) != 0) {
-      timedOut = YES;
+      dispatch_sync(stateQueue, ^{
+        timedOut = YES;
+      });
       [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
       pcSetError(errorOut, @"export original resource timed out");
       return 0;
