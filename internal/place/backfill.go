@@ -153,11 +153,18 @@ type backfillRunState struct {
 }
 
 func runBackfillRound(ctx context.Context, jobs []backfillKey, attempt int, state *backfillRunState) error {
+	state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	return runBackfillJobs(ctx, jobs, attempt, state, attemptBackfillKey)
+}
+
+func runBackfillJobs(ctx context.Context, jobs []backfillKey, attempt int, state *backfillRunState, attemptFn func(context.Context, backfillKey, int, *backfillRunState) error) error {
 	work := make(chan backfillKey)
 	var wg sync.WaitGroup
 	var firstErr error
 	var errMu sync.Mutex
-	state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	if state.limiter == nil {
+		state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	}
 
 	for i := 0; i < backfillWorkers; i++ {
 		wg.Add(1)
@@ -172,9 +179,10 @@ func runBackfillRound(ctx context.Context, jobs []backfillKey, attempt int, stat
 					setFirstErr(&errMu, &firstErr, err)
 					return
 				}
-				if err := attemptBackfillKey(ctx, key, attempt, state); err != nil {
+				if err := attemptFn(ctx, key, attempt, state); err != nil {
 					setFirstErr(&errMu, &firstErr, err)
-					return
+					// Stay on the channel so the unbuffered sender can finish.
+					continue
 				}
 			}
 		}()
