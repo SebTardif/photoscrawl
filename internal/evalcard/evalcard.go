@@ -196,7 +196,6 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	defer manifest.Close()
 	writer := bufio.NewWriter(manifest)
-	defer writer.Flush()
 
 	inputs := []preparedInput{}
 	for _, asset := range assets {
@@ -225,6 +224,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		result.ModelCallsAttempted = len(inputs) * len(opts.Models)
 		result.ModelCallsSucceeded = succeeded
 		result.ModelCallsFailed = failed
+	}
+
+	if err := commitManifest(writer, manifest); err != nil {
+		return Result{}, err
 	}
 
 	summary, err := json.MarshalIndent(result, "", "  ")
@@ -374,4 +377,13 @@ func classifySkip(err error) string {
 		return "unknown"
 	}
 	return value
+}
+
+var commitManifest = finishManifest
+
+func finishManifest(w *bufio.Writer, f *os.File) error {
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return f.Close()
 }

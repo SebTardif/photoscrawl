@@ -1,10 +1,16 @@
 package evalcard
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/openclaw/photoscrawl/internal/photos"
 )
 
 func TestNormalizeOllamaGenerateURL(t *testing.T) {
@@ -65,4 +71,103 @@ func TestPromptWithMetadataUsesTemplateFileText(t *testing.T) {
 	if got != "Prompt\n\n{\"asset\":\"A\"}" {
 		t.Fatalf("promptWithMetadata = %q", got)
 	}
+}
+
+func TestFinishManifestReturnsFlushError(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "manifest.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	want := errors.New("no space left on device")
+	writer := bufio.NewWriterSize(errWriter{err: want}, 64)
+	if _, err := writer.WriteString(`{"eval_id":"E001"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	err = finishManifest(writer, f)
+	if !errors.Is(err, want) {
+		t.Fatalf("finishManifest = %v, want %v", err, want)
+	}
+}
+
+func TestFinishManifestReturnsCloseError(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "manifest.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = finishManifest(bufio.NewWriter(io.Discard), f)
+	if err == nil {
+		t.Fatal("finishManifest succeeded on an already-closed file")
+	}
+}
+
+func TestRunReturnsManifestFlushErrorBeforeWritingSummary(t *testing.T) {
+	orig := commitManifest
+	want := errors.New("no space left on device")
+	commitManifest = func(*bufio.Writer, *os.File) error {
+		return want
+	}
+	t.Cleanup(func() { commitManifest = orig })
+
+	opts, summaryPath := evalRunOptions(t)
+	_, err := Run(context.Background(), opts)
+	if !errors.Is(err, want) {
+		t.Fatalf("Run = %v, want %v", err, want)
+	}
+	if _, statErr := os.Stat(summaryPath); !os.IsNotExist(statErr) {
+		t.Fatalf("summary.json exists after manifest flush failure: %v", statErr)
+	}
+}
+
+func TestRunWritesSummaryAfterManifestCommit(t *testing.T) {
+	opts, summaryPath := evalRunOptions(t)
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(result.ManifestPath); err != nil {
+		t.Fatalf("manifest.jsonl: %v", err)
+	}
+	if _, err := os.Stat(summaryPath); err != nil {
+		t.Fatalf("summary.json: %v", err)
+	}
+}
+
+func evalRunOptions(t *testing.T) (Options, string) {
+	t.Helper()
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "lib")
+	if err := os.Mkdir(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prompt := filepath.Join(dir, "prompt.md")
+	if err := os.WriteFile(prompt, []byte("prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	return Options{
+		LibraryPath: lib,
+		OutputDir:   out,
+		CacheDir:    filepath.Join(dir, "cache"),
+		PromptPath:  prompt,
+		Provider:    stubProvider{},
+		Limit:       1,
+	}, filepath.Join(out, "summary.json")
+}
+
+type stubProvider struct{}
+
+func (stubProvider) Snapshot(context.Context, string) (photos.LibrarySnapshot, error) {
+	return photos.LibrarySnapshot{}, nil
+}
+
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }
