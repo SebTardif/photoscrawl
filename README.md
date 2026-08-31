@@ -147,6 +147,9 @@ provider failures, and writes the manifest, attempts, raw successful provider
 outputs, and final errors under the crawlkit data dir's
 `backfills/place-context-full/apple-ingest` subtree.
 
+Ctrl-C cancels backfill retry waits promptly. If a command is blocked in a native
+call or input read, a second Ctrl-C terminates it.
+
 `eval-card` is an opt-in research harness for prompt/model evaluation. It uses
 the tracked prompt files in `prompts/`, prepares canonical full-resolution JPEGs
 from originals, passes full metadata as a sidecar prompt input, and writes all
@@ -154,6 +157,9 @@ private images, metadata, and model responses under the crawlkit data dir's
 `evals` subtree. If `--allow-icloud-downloads` is set, PhotoKit may download
 missing originals into the crawlkit cache dir's `originals` subtree; normal
 crawl/classify commands do not force iCloud downloads.
+
+The eval-card summary is written only after its manifest flush and close succeed;
+manifest persistence errors fail the run before the summary is written.
 
 ## Current Useful Output
 

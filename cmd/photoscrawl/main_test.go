@@ -1,17 +1,72 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestCommandContextSecondInterruptTerminates(t *testing.T) {
+	if os.Getenv("PHOTOSCRAWL_TEST_SIGNAL_CHILD") == "1" {
+		ctx, stop := commandContext()
+		defer stop()
+		fmt.Println("ready")
+		<-ctx.Done()
+		fmt.Println("canceled")
+		select {}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestCommandContextSecondInterruptTerminates$")
+	cmd.Env = append(os.Environ(), "PHOTOSCRAWL_TEST_SIGNAL_CHILD=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() || scanner.Text() != "ready" {
+		t.Fatal("child did not install signal handling")
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	if !scanner.Scan() || scanner.Text() != "canceled" {
+		t.Fatal("first interrupt did not cancel the context")
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	// Allow the cancellation goroutine to unregister before the next signal.
+	time.Sleep(50 * time.Millisecond)
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || ctx.Err() != nil {
+			t.Fatalf("second interrupt did not terminate child: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second interrupt was swallowed")
+	}
+}
 
 func TestWriteVersion(t *testing.T) {
 	previous := version

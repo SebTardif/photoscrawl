@@ -21,7 +21,13 @@ import (
 var version = "dev"
 
 func commandContext() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		// A second signal must still terminate commands blocked in native calls or stdin.
+		stop()
+	}()
+	return ctx, stop
 }
 
 func main() {
