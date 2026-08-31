@@ -127,7 +127,9 @@ func Backfill(ctx context.Context, opts BackfillOptions) (BackfillResult, error)
 			continue
 		}
 		if attempt > 1 {
-			time.Sleep(backfillRetryDelay(attempt))
+			if err := sleepContext(ctx, backfillRetryDelay(attempt)); err != nil {
+				return state.result, err
+			}
 		}
 		if err := runBackfillRound(ctx, jobs, attempt, state); err != nil {
 			return state.result, err
@@ -158,10 +160,10 @@ func runBackfillRound(ctx context.Context, jobs []backfillKey, attempt int, stat
 }
 
 func runBackfillJobs(ctx context.Context, jobs []backfillKey, attempt int, state *backfillRunState, attemptFn func(context.Context, backfillKey, int, *backfillRunState) error) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	work := make(chan backfillKey)
 	var wg sync.WaitGroup
-	var firstErr error
-	var errMu sync.Mutex
 	if state.limiter == nil {
 		state.limiter = &backfillLimiter{interval: backfillStartEvery}
 	}
@@ -172,30 +174,31 @@ func runBackfillJobs(ctx context.Context, jobs []backfillKey, attempt int, state
 			defer wg.Done()
 			for key := range work {
 				if err := ctx.Err(); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
 					return
 				}
 				if err := state.limiter.wait(ctx); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
+					cancel(err)
 					return
 				}
 				if err := attemptFn(ctx, key, attempt, state); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
-					// Stay on the channel so the unbuffered sender can finish.
-					continue
+					// Release the dispatcher and other workers while preserving the write error.
+					cancel(err)
+					return
 				}
 			}
 		}()
 	}
+dispatch:
 	for _, key := range jobs {
-		if ctx.Err() != nil {
-			break
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case work <- key:
 		}
-		work <- key
 	}
 	close(work)
 	wg.Wait()
-	return firstErr
+	return context.Cause(ctx)
 }
 
 type backfillLimiter struct {
@@ -214,11 +217,17 @@ func (limiter *backfillLimiter) wait(ctx context.Context) error {
 	limiter.next = startAt.Add(limiter.interval)
 	limiter.mu.Unlock()
 
-	wait := time.Until(startAt)
-	if wait <= 0 {
+	return sleepContext(ctx, time.Until(startAt))
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(wait)
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -353,12 +362,4 @@ func isReverseGeocodeThrottle(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "Apple reverse geocode failed") ||
 		strings.Contains(message, "Apple reverse geocode timed out")
-}
-
-func setFirstErr(mu *sync.Mutex, target *error, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	if *target == nil {
-		*target = err
-	}
 }
