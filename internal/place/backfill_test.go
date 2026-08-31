@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,4 +173,85 @@ create table location_observation (
 		}
 	}
 	return nil
+}
+
+func TestRunBackfillJobsWriteErrorDoesNotHangSender(t *testing.T) {
+	const extraJobs = 4
+	jobCount := backfillWorkers + extraJobs
+	jobs := make([]backfillKey, jobCount)
+	for i := range jobs {
+		jobs[i] = backfillKey{Index: i, key: fmt.Sprintf("k%d", i)}
+	}
+
+	var seen atomic.Int32
+	writeErr := errors.New("write failed")
+	state := &backfillRunState{
+		outputDir: t.TempDir(),
+		limiter:   &backfillLimiter{interval: time.Hour},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runBackfillJobs(context.Background(), jobs, 1, state, func(context.Context, backfillKey, int, *backfillRunState) error {
+			seen.Add(1)
+			return writeErr
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("err = %v, want %v", err, writeErr)
+		}
+		if got := seen.Load(); got != 1 {
+			t.Fatalf("attempted %d jobs after write error, want 1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("sender hung after worker write errors; attempted %d of %d jobs", seen.Load(), jobCount)
+	}
+}
+
+func TestRunBackfillJobsCompletesSuccessfulJobs(t *testing.T) {
+	jobs := make([]backfillKey, backfillWorkers*3)
+	var seen atomic.Int32
+	state := &backfillRunState{limiter: &backfillLimiter{}}
+	err := runBackfillJobs(context.Background(), jobs, 1, state, func(context.Context, backfillKey, int, *backfillRunState) error {
+		seen.Add(1)
+		return nil
+	})
+	if err != nil || int(seen.Load()) != len(jobs) {
+		t.Fatalf("attempted %d of %d jobs: %v", seen.Load(), len(jobs), err)
+	}
+}
+
+func TestRunBackfillJobsCancelsBlockedDispatchAndAttempts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := make([]backfillKey, backfillWorkers*3)
+	started := make(chan struct{}, backfillWorkers)
+	done := make(chan error, 1)
+	state := &backfillRunState{limiter: &backfillLimiter{}}
+	go func() {
+		done <- runBackfillJobs(ctx, jobs, 1, state, func(ctx context.Context, _ backfillKey, _ int, _ *backfillRunState) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	for i := 0; i < backfillWorkers; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("workers did not start")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation left dispatcher blocked")
+	}
 }

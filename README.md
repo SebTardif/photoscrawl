@@ -147,6 +147,9 @@ provider failures, and writes the manifest, attempts, raw successful provider
 outputs, and final errors under the crawlkit data dir's
 `backfills/place-context-full/apple-ingest` subtree.
 
+An evidence write failure stops the current backfill round, cancels pending
+attempts, and returns the original write error.
+
 Ctrl-C cancels backfill retry waits promptly. If a command is blocked in a native
 call or input read, a second Ctrl-C terminates it.
 

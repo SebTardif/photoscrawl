@@ -155,11 +155,18 @@ type backfillRunState struct {
 }
 
 func runBackfillRound(ctx context.Context, jobs []backfillKey, attempt int, state *backfillRunState) error {
+	state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	return runBackfillJobs(ctx, jobs, attempt, state, attemptBackfillKey)
+}
+
+func runBackfillJobs(ctx context.Context, jobs []backfillKey, attempt int, state *backfillRunState, attemptFn func(context.Context, backfillKey, int, *backfillRunState) error) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	work := make(chan backfillKey)
 	var wg sync.WaitGroup
-	var firstErr error
-	var errMu sync.Mutex
-	state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	if state.limiter == nil {
+		state.limiter = &backfillLimiter{interval: backfillStartEvery}
+	}
 
 	for i := 0; i < backfillWorkers; i++ {
 		wg.Add(1)
@@ -167,38 +174,31 @@ func runBackfillRound(ctx context.Context, jobs []backfillKey, attempt int, stat
 			defer wg.Done()
 			for key := range work {
 				if err := ctx.Err(); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
 					return
 				}
 				if err := state.limiter.wait(ctx); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
+					cancel(err)
 					return
 				}
-				if err := attemptBackfillKey(ctx, key, attempt, state); err != nil {
-					setFirstErr(&errMu, &firstErr, err)
+				if err := attemptFn(ctx, key, attempt, state); err != nil {
+					// Release the dispatcher and other workers while preserving the write error.
+					cancel(err)
 					return
 				}
 			}
 		}()
 	}
+dispatch:
 	for _, key := range jobs {
 		select {
 		case <-ctx.Done():
-			close(work)
-			wg.Wait()
-			if firstErr != nil {
-				return firstErr
-			}
-			return ctx.Err()
+			break dispatch
 		case work <- key:
 		}
 	}
 	close(work)
 	wg.Wait()
-	if firstErr != nil {
-		return firstErr
-	}
-	return ctx.Err()
+	return context.Cause(ctx)
 }
 
 type backfillLimiter struct {
@@ -362,12 +362,4 @@ func isReverseGeocodeThrottle(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "Apple reverse geocode failed") ||
 		strings.Contains(message, "Apple reverse geocode timed out")
-}
-
-func setFirstErr(mu *sync.Mutex, target *error, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	if *target == nil {
-		*target = err
-	}
 }
