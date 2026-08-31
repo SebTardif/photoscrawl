@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/openclaw/crawlkit/output"
 	"github.com/openclaw/photoscrawl/internal/archive"
@@ -18,8 +20,20 @@ import (
 
 var version = "dev"
 
+func commandContext() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		// A second signal must still terminate commands blocked in native calls or stdin.
+		stop()
+	}()
+	return ctx, stop
+}
+
 func main() {
-	if err := run(context.Background(), os.Args[1:]); err != nil {
+	ctx, stop := commandContext()
+	defer stop()
+	if err := run(ctx, os.Args[1:]); err != nil {
 		if output.IsUsage(err) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)

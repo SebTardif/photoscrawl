@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Cancel place-backfill retry waits on Ctrl-C while preserving second-interrupt termination for blocked commands; thanks @SebTardif.
+- Return eval-card manifest flush and close failures before writing its summary; thanks @SebTardif.
 - Update to Go 1.26.7, CrawlKit v0.14.7, SQLite v1.57.0, deadcode v0.49.0, and the v7 checkout/setup-go actions; retain CodeQL's supported Go toolchain.
 - Update Go dependencies, including `go-isatty` v0.0.24 and `x/sys` v0.47.0.
 - Standardize the Makefile's build, check, snapshot, and fail-closed release targets across the crawler repositories.
