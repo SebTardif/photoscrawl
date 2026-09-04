@@ -2,9 +2,11 @@ module github.com/openclaw/photoscrawl
 
 go 1.27.0
 
+toolchain go1.27.1
+
 require (
 	github.com/openclaw/crawlkit v0.14.8
-	modernc.org/sqlite v1.57.0
+	modernc.org/sqlite v1.58.0
 )
 
 require (
