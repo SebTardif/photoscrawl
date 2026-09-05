@@ -51,6 +51,7 @@ func TestExportNativeIntegration(t *testing.T) {
 	}{
 		{name: "unlimited-default", mode: "slow", success: true},
 		{name: "explicit-unlimited", mode: "slow", flags: []string{"--timeout", "0"}, success: true},
+		{name: "unlimited-authorization", mode: "auth-slow", success: true},
 		{name: "timeout", mode: "stall", flags: []string{"--timeout", "1s"}, wantError: "context deadline exceeded"},
 		{name: "cancel-download", mode: "stall", signal: true, wantError: "context canceled"},
 		{name: "cancel-authorization", mode: "auth", signal: true, wantError: "context canceled"},
@@ -99,7 +100,11 @@ func TestExportNativeIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			limit := 10 * time.Second
+			if tc.mode == "auth-slow" {
+				limit = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
 			defer cancel()
 			args := []string{"export", "--db", dbPath, "--id", id, "--output", outDir, "--json"}
 			args = append(args, tc.flags...)

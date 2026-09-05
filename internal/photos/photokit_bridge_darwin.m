@@ -149,7 +149,8 @@ static id pcJSONSafe(id value) {
 static BOOL pcWaitForAuthorization(dispatch_semaphore_t semaphore, void *exportControl) {
   uint64_t deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 15 * NSEC_PER_SEC;
   BOOL ready = NO;
-  while (!photoscrawl_export_cancelled(exportControl) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline) {
+  while (!photoscrawl_export_cancelled(exportControl) &&
+         (exportControl != NULL || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline)) {
     if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
       ready = YES;
       break;

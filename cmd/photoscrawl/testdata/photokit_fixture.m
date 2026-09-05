@@ -16,11 +16,12 @@ static void mark(NSString *name) {
   if (![[NSFileManager defaultManager] createFileAtPath:path contents:[NSData data] attributes:nil]) abort();
 }
 static PHAuthorizationStatus authorization(id self, SEL selector, ...) {
-  return [mode isEqual:@"auth"] ? PHAuthorizationStatusNotDetermined : PHAuthorizationStatusAuthorized;
+  return [mode hasPrefix:@"auth"] ? PHAuthorizationStatusNotDetermined : PHAuthorizationStatusAuthorized;
 }
 static void authorize(id self, SEL selector, PHAccessLevel level, void (^handler)(PHAuthorizationStatus)) {
   mark(@"authorization");
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{
+  int64_t delay = [mode isEqual:@"auth-slow"] ? 16 * NSEC_PER_SEC : 300 * NSEC_PER_MSEC;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_global_queue(0, 0), ^{
     handler(PHAuthorizationStatusAuthorized);
     mark(@"late");
   });
