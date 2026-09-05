@@ -7,6 +7,8 @@
 #import <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include "original_export_darwin.h"
 
 static NSString *pcString(NSString *value) {
   return value == nil ? @"" : value;
@@ -144,20 +146,35 @@ static id pcJSONSafe(id value) {
   return [value description];
 }
 
-static PHAuthorizationStatus pcEnsureAuthorized(void) {
+static BOOL pcWaitForAuthorization(dispatch_semaphore_t semaphore, void *exportControl) {
+  uint64_t deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 15 * NSEC_PER_SEC;
+  BOOL ready = NO;
+  while (!photoscrawl_export_cancelled(exportControl) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline) {
+    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
+      ready = YES;
+      break;
+    }
+  }
+  dispatch_release(semaphore);
+  return ready;
+}
+
+static PHAuthorizationStatus pcEnsureAuthorized(void *exportControl) {
+  if (photoscrawl_export_cancelled(exportControl)) return PHAuthorizationStatusNotDetermined;
   __block PHAuthorizationStatus status;
-  const int64_t authorizationTimeout = 15 * NSEC_PER_SEC;
   if (@available(macOS 11.0, *)) {
     // macOS Photos exposes asset fetch access through ReadWrite; AddOnly cannot
     // enumerate the library. This bridge still only calls fetch/read APIs.
     status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
     if (status == PHAuthorizationStatusNotDetermined) {
       dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+      dispatch_retain(semaphore);
       [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus requestedStatus) {
         status = requestedStatus;
         dispatch_semaphore_signal(semaphore);
+        dispatch_release(semaphore);
       }];
-      if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, authorizationTimeout)) != 0) {
+      if (!pcWaitForAuthorization(semaphore, exportControl)) {
         return PHAuthorizationStatusNotDetermined;
       }
     }
@@ -167,11 +184,13 @@ static PHAuthorizationStatus pcEnsureAuthorized(void) {
   status = [PHPhotoLibrary authorizationStatus];
   if (status == PHAuthorizationStatusNotDetermined) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    dispatch_retain(semaphore);
     [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus requestedStatus) {
       status = requestedStatus;
       dispatch_semaphore_signal(semaphore);
+      dispatch_release(semaphore);
     }];
-    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, authorizationTimeout)) != 0) {
+    if (!pcWaitForAuthorization(semaphore, exportControl)) {
       return PHAuthorizationStatusNotDetermined;
     }
   }
@@ -397,7 +416,7 @@ char *photoscrawl_photokit_snapshot(const char *libraryPath, char **errorOut) {
         return NULL;
       }
 
-      PHAuthorizationStatus status = pcEnsureAuthorized();
+      PHAuthorizationStatus status = pcEnsureAuthorized(NULL);
       if (status != PHAuthorizationStatusAuthorized && status != PHAuthorizationStatusLimited) {
         pcSetError(errorOut, [NSString stringWithFormat:@"Photos access is %@ for this process", pcAuthorizationStatus(status)]);
         return NULL;
@@ -463,98 +482,37 @@ char *photoscrawl_photokit_snapshot(const char *libraryPath, char **errorOut) {
   }
 }
 
-static dispatch_time_t pcBoundedWaitDeadline(long long timeoutNanoseconds) {
-  if (timeoutNanoseconds <= 0) {
-    return DISPATCH_TIME_NOW;
+void *photoscrawl_copy_original_resource(const char *localIdentifier, void *exportControl, char **errorOut) {
+  NSString *identifier = localIdentifier == NULL ? @"" : [NSString stringWithUTF8String:localIdentifier];
+  if (identifier.length == 0) {
+    pcSetError(errorOut, @"asset identifier is required");
+    return NULL;
   }
-  return dispatch_time(DISPATCH_TIME_NOW, timeoutNanoseconds);
-}
-
-int photoscrawl_wait_bounded(long long timeoutNanoseconds) {
-  dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-  if (dispatch_semaphore_wait(semaphore, pcBoundedWaitDeadline(timeoutNanoseconds)) != 0) {
-    return 0;
+  PHAuthorizationStatus status = pcEnsureAuthorized(exportControl);
+  if (photoscrawl_export_cancelled(exportControl)) {
+    pcSetError(errorOut, @"export original resource canceled");
+    return NULL;
   }
-  return 1;
-}
-
-int photoscrawl_export_original_resource(const char *localIdentifier, const char *destinationPath, int allowNetwork, long long timeoutNanoseconds, char **errorOut) {
-  @autoreleasepool {
-    if (errorOut != NULL) {
-      *errorOut = NULL;
-    }
-    if (!@available(macOS 10.15, *)) {
-      pcSetError(errorOut, @"PhotoKit export requires macOS 10.15 or newer");
-      return 0;
-    }
-
-    NSString *identifier = localIdentifier == NULL ? @"" : [NSString stringWithUTF8String:localIdentifier];
-    NSString *path = destinationPath == NULL ? @"" : [NSString stringWithUTF8String:destinationPath];
-    if (identifier.length == 0 || path.length == 0) {
-      pcSetError(errorOut, @"asset identifier and destination path are required");
-      return 0;
-    }
-
-    PHAuthorizationStatus status = pcEnsureAuthorized();
-    if (status != PHAuthorizationStatusAuthorized && status != PHAuthorizationStatusLimited) {
-      pcSetError(errorOut, [NSString stringWithFormat:@"Photos access is %@ for this process", pcAuthorizationStatus(status)]);
-      return 0;
-    }
-
-    PHFetchResult<PHAsset *> *fetch = [PHAsset fetchAssetsWithLocalIdentifiers:@[identifier] options:nil];
-    PHAsset *asset = fetch.firstObject;
-    if (asset == nil) {
-      pcSetError(errorOut, @"PhotoKit asset not found");
-      return 0;
-    }
-    PHAssetResource *resource = pcPreferredOriginalResource(asset);
-    if (resource == nil) {
-      pcSetError(errorOut, @"PhotoKit asset has no supported original resource");
-      return 0;
-    }
-
-    NSURL *destination = [NSURL fileURLWithPath:path];
-    if (!pcEnsureParentDirectory(destination, errorOut)) {
-      return 0;
-    }
-    NSString *stagingName = [NSString stringWithFormat:@".%@.photoscrawl-export-%@", path.lastPathComponent, NSUUID.UUID.UUIDString];
-    NSURL *staging = [[destination URLByDeletingLastPathComponent] URLByAppendingPathComponent:stagingName];
-    [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
-
-    PHAssetResourceRequestOptions *options = [[PHAssetResourceRequestOptions alloc] init];
-    options.networkAccessAllowed = allowNetwork ? YES : NO;
-
-    __block NSString *writeErrorDescription = nil;
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:resource toFile:destination options:options completionHandler:^(NSError * _Nullable error) {
-      if (error != nil) {
-        writeErrorDescription = [error.localizedDescription copy];
-      }
-      dispatch_semaphore_signal(semaphore);
-    }];
-    if (dispatch_semaphore_wait(semaphore, pcBoundedWaitDeadline(timeoutNanoseconds)) != 0) {
-      dispatch_sync(stateQueue, ^{
-        timedOut = YES;
-      });
-      [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
-      pcSetError(errorOut, @"export original resource timed out");
-      return 0;
-    }
-
-    if (writeErrorDescription != nil) {
-      pcSetError(errorOut, [NSString stringWithFormat:@"export original resource: %@", writeErrorDescription]);
-      [writeErrorDescription release];
-      return 0;
-    }
-    NSError *moveError = nil;
-    [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
-    if (![[NSFileManager defaultManager] moveItemAtURL:staging toURL:destination error:&moveError]) {
-      [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
-      pcSetError(errorOut, [NSString stringWithFormat:@"promote exported original: %@", moveError.localizedDescription]);
-      return 0;
-    }
-    return 1;
+  if (status != PHAuthorizationStatusAuthorized && status != PHAuthorizationStatusLimited) {
+    pcSetError(errorOut, [NSString stringWithFormat:@"Photos access is %@ for this process", pcAuthorizationStatus(status)]);
+    return NULL;
   }
+  PHFetchResult<PHAsset *> *fetch = [PHAsset fetchAssetsWithLocalIdentifiers:@[identifier] options:nil];
+  if (photoscrawl_export_cancelled(exportControl)) {
+    pcSetError(errorOut, @"export original resource canceled");
+    return NULL;
+  }
+  PHAsset *asset = fetch.firstObject;
+  if (asset == nil) {
+    pcSetError(errorOut, @"PhotoKit asset not found");
+    return NULL;
+  }
+  PHAssetResource *resource = pcPreferredOriginalResource(asset);
+  if (resource == nil) {
+    pcSetError(errorOut, @"PhotoKit asset has no supported original resource");
+    return NULL;
+  }
+  return [resource retain];
 }
 
 int photoscrawl_render_canonical_jpeg(const char *sourcePath, const char *destinationPath, double quality, char **errorOut) {
